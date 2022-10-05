@@ -16,11 +16,7 @@ python -m wsminer.server
 
 ``` PYTHON
 import asyncio
-import websockets
-from uuid import uuid4
-import json
 import wsminer
-import pprint
 
 async def main():
     client = wsminer.Client()
