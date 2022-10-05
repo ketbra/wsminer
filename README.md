@@ -1,0 +1,2 @@
+# wsminer
+Minecraft Python Scripting
