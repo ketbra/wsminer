@@ -1,9 +1,11 @@
 #!/usr/bin/env python
+from pprint import pprint
 import websockets
 from uuid import uuid4
 import json
 import asyncio
 import math
+from .binvox import Binvox
 from PIL import Image
 from numpy import asarray
 from .palette import palette
@@ -45,7 +47,7 @@ class Client:
         self._websocket = None
         self._send_queue = []
         self._awaiting_response = {}
-        self._awaiting_limit = 100
+        self._awaiting_limit = 90
         self._nn_model = None
 
     def _hex2rgb(self, h):
@@ -84,6 +86,14 @@ class Client:
                 # ... and it's for an awaited command
                 request_id = response_msg.get('header').get('requestId')
                 if request_id in self._awaiting_response:
+                    status = response_msg.get('body').get('statusCode')
+                    # if status < 0:
+                    #     import sys
+                    #     print(f"fatal error {status}", file=sys.stderr)
+                    # else:
+                    #     future =  self._awaiting_response.get(request_id)
+                    #     future.set_result(response_msg)
+                    #     future.done()
                     future =  self._awaiting_response.get(request_id)
                     future.set_result(response_msg)
                     future.done()
@@ -117,30 +127,80 @@ class Client:
     async def fill(self, x1, y1, x2, y2, material):
         pass
 
-    async def draw_cyclinder(self, radius, height, material):
+    async def draw_cyclinder(self, radius, height, material, x_offset=0, y_offset=0, z_offset=0):
         tasks = []
         for y in range(0, height):
-            tasks.append(self.draw_circle(radius, material, y))
+            tasks.append(self.draw_circle(radius, material, x_offset=x_offset, y_offset=y + y_offset, z_offset=z_offset))
         results = await asyncio.gather(*tasks)
 
 
-    async def draw_cone(self, radius, material):
+    async def draw_cone(self, radius, material, x_offset=0, y_offset=0, z_offset=0):
         tasks = []
         for y in range(0, radius):
-            tasks.append(self.draw_circle(radius-y, material, y))
+            print(f"Runing draw_circle({radius-y}, {material}, {y + y_offset})")
+            tasks.append(self.draw_circle(radius-y, material, x_offset=x_offset, y_offset=y + y_offset, z_offset=z_offset))
         results = await asyncio.gather(*tasks)
 
     async def draw_cube(self, x, y, size, material, hollow=False):
         pass
 
-    async def draw_circle(self, radius, material, y=0):
+    async def draw_binvox(self, path, material, y_offset=0, x_offset=0, z_offset=0):
+        model = Binvox.read(path, mode='dense').numpy()
+        (depth, width, height) = model.shape
+
         tasks = []
+        for x in range(0, depth):
+            for z in range(0, width):
+                for y in range(0, height):
+                    if model[x][z][y] and (
+                            x == 0
+                            or x == depth - 1
+                            or y == 0
+                            or y == height - 1
+                            or z == 0
+                            or z == width - 1
+                            or not model[x-1][z][y]
+                            or not model[x+1][z][y]
+                            or not model[x][z-1][y]
+                            or not model[x][z+1][y]
+                            or not model[x][z][y-1]
+                            or not model[x][z][y+1]
+                    ):
+                        print(f"{x}, {y}, {z}")
+                        tasks.append(self.send_command(f"setblock ~{x + x_offset} ~{y + y_offset} ~{z + z_offset} {material}"))
+
+        results = await asyncio.gather(*tasks)
+
+    async def draw_circle(self, radius, material, y_offset=0, x_offset=0, z_offset=0):
+        tasks = []
+
+
+        # # Figure out the key blocks we want to place
+        # key_blocks = []
+        # for x in range(0, radius+1):
+        #     z = round(radius*math.sin(math.acos(x/radius)))
+        #     key_blocks.append([x, y, z])
+        #     key_blocks.append([x, y, -z])
+        #     key_blocks.append([-x, y, z])
+        #     key_blocks.append([-x, y, -z])
+
+        # blocks = interpolate_blocks(key_blocks)
+
+        last_z = None
         for x in range(0, radius+1):
-            z = round(radius*math.sin(math.acos(x/radius)))
-            tasks.append(self.send_command(f"setblock ~{x} ~{y} ~{z} {material}"))
-            tasks.append(self.send_command(f"setblock ~{x} ~{y} ~{-z} {material}"))
-            tasks.append(self.send_command(f"setblock ~{-x} ~{y} ~{z} {material}"))
-            tasks.append(self.send_command(f"setblock ~{-x} ~{y} ~{-z} {material}"))
+            new_z = round(radius*math.sin(math.acos(x/radius)))
+            zs = [new_z]
+            if last_z:
+                zs = range(new_z, last_z+1)
+
+            for z in zs:
+                tasks.append(self.send_command(f"setblock ~{x + x_offset} ~{y_offset} ~{z + z_offset} {material}"))
+                tasks.append(self.send_command(f"setblock ~{x + x_offset} ~{y_offset} ~{-z + z_offset} {material}"))
+                tasks.append(self.send_command(f"setblock ~{-x + x_offset} ~{y_offset} ~{z + z_offset} {material}"))
+                tasks.append(self.send_command(f"setblock ~{-x + x_offset} ~{y_offset} ~{-z + z_offset} {material}"))
+                
+            last_z = new_z
+
         results = await asyncio.gather(*tasks)
 
     async def draw_monochrome_image(self, file, material="obsidian", background=None):
@@ -251,26 +311,6 @@ class Client:
                 closest_block = color_record[1]
 
         return closest_block
-
-# >>> X = np.array([[-1, -1], [-2, -1], [-3, -2], [1, 1], [2, 1], [3, 2]])
-# >>> nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(X)
-# >>> distances, indices = nbrs.kneighbors(X)
-# >>> indices
-# array([[0, 1],
-#        [1, 0],
-#        [2, 1],
-#        [3, 4],
-#        [4, 3],
-#        [5, 4]]...)
-# >>> distances
-# array([[0.        , 1.        ],
-#        [0.        , 1.        ],
-#        [0.        , 1.41421356],
-#        [0.        , 1.        ],
-#        [0.        , 1.        ],
-#        [0.        , 1.41421356]])
-
-
 
     async def draw_sphere(self, radius, material):
         tasks = []
